@@ -1,0 +1,17 @@
+extends: existence
+message: "Use a precise claim, amount, condition, or source instead of '%s'."
+level: warning
+ignorecase: true
+tokens:
+  - clearly
+  - obviously
+  - simply
+  - basically
+  - essentially
+  - arguably
+  - various
+  - numerous
+  - many
+  - some
+  - very
+  - really

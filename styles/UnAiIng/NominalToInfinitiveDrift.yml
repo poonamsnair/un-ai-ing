@@ -1,0 +1,6 @@
+extends: existence
+message: "Check meaning drift: '%s' can mean the testing process is difficult. If you mean a benchmark or challenge, use a noun phrase such as 'a tough test for ...'."
+level: warning
+ignorecase: true
+tokens:
+  - '\b(?:is|are|was|were|be|been|being)\s+(?:hard|tough|difficult|tricky|useful|good|strong|poor|weak)\s+to\s+test\s+for\s+(?:AI agents|agents|models|systems|LLMs|evaluators)\b'

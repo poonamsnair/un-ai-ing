@@ -1,0 +1,10 @@
+extends: existence
+message: "State the actual finding or claim directly instead of using stock academic filler."
+level: warning
+ignorecase: true
+tokens:
+  - it is important to note
+  - it should be noted
+  - it is worth noting
+  - this paper seeks to
+  - the findings suggest that

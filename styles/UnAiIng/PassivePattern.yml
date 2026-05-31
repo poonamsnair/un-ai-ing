@@ -1,0 +1,6 @@
+extends: existence
+message: "This looks like passive voice. Name the actor or recast the sentence around a stronger verb."
+level: warning
+ignorecase: true
+tokens:
+  - '\b(?:is|are|was|were|be|been|being)\s+\w+(?:ed|en)\b'

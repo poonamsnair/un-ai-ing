@@ -1,0 +1,72 @@
+{
+  "name": "un-ai-ing",
+  "version": "0.1.0",
+  "description": "A local writing editor that helps coding agents review and revise AI-sounding drafts.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "start": "npm run dev",
+    "build": "tsc -b && vite build",
+    "check": "tsc -b --pretty false",
+    "preview": "vite preview --host 127.0.0.1",
+    "build:writing-graph": "node scripts/build-writing-knowledge.mjs",
+    "style:vale": "node_modules/@vvago/vale/bin/vale"
+  },
+  "keywords": [
+    "writing",
+    "editor",
+    "agents",
+    "style-review",
+    "tiptap"
+  ],
+  "author": "poonamsnair",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/poonamsnair/un-ai-ing.git"
+  },
+  "bugs": {
+    "url": "https://github.com/poonamsnair/un-ai-ing/issues"
+  },
+  "homepage": "https://github.com/poonamsnair/un-ai-ing#readme",
+  "license": "MIT",
+  "dependencies": {
+    "@fontsource/gaegu": "^5.2.8",
+    "@fontsource/reenie-beanie": "^5.2.8",
+    "@fontsource/rock-salt": "^5.2.8",
+    "@tiptap/core": "^3.23.6",
+    "@tiptap/extension-highlight": "^3.23.6",
+    "@tiptap/extension-link": "^3.23.6",
+    "@tiptap/extension-table": "^3.23.6",
+    "@tiptap/extension-table-cell": "^3.23.6",
+    "@tiptap/extension-table-header": "^3.23.6",
+    "@tiptap/extension-table-row": "^3.23.6",
+    "@tiptap/extension-text-align": "^3.23.6",
+    "@tiptap/extension-text-style": "^3.23.6",
+    "@tiptap/extension-underline": "^3.23.6",
+    "@tiptap/pm": "^3.23.6",
+    "@tiptap/react": "^3.23.6",
+    "@tiptap/starter-kit": "^3.23.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "flesch-kincaid": "^2.0.1",
+    "gsap": "^3.15.0",
+    "lucide-react": "^1.17.0",
+    "mammoth": "^1.12.0",
+    "pdfjs-dist": "^6.0.227",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "retext-english": "^5.0.0",
+    "retext-passive": "^5.0.0",
+    "retext-stringify": "^4.0.0",
+    "syllable": "^5.0.1",
+    "typescript": "^6.0.3",
+    "unified": "^11.0.5",
+    "vite": "^8.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@vvago/vale": "^3.14.2"
+  }
+}
