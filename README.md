@@ -17,7 +17,7 @@ un-AI-ing is a local writing-review app for turning AI-sounding drafts into clea
 - Lets reviewers add manual highlights, comments, style references, underlines, and removal marks.
 - Imports `.doc`, `.docx`, `.pdf`, `.txt`, `.md`, and `.html` files.
 - Tracks saved rewrite versions with better/same/worse feedback.
-- Copies one agent-ready report containing the draft, review marks, reviewer comments, style references, rewrite feedback, a rewrite brief, and style-repair instructions.
+- Copies one agent-ready report containing the draft, source document context, captured HTML/CSS scaffold, review marks, reviewer comments, style references, rewrite feedback, and instructions to use the local rewrite skills, including a final cull pass for lines that do not add meaning.
 
 ## Quick Start
 
@@ -44,4 +44,4 @@ Open the local URL Vite prints in the terminal, usually [http://127.0.0.1:5173](
 5. Click the copy button in the toolbar.
 6. Paste the copied report into Codex, Claude Code, Cursor, or another CLI agent and ask it to rewrite the draft from that packet.
 
-The copied report tells the agent what to preserve, what to change, which facts matter, and how to avoid copying style-reference content.
+The copied report tells the agent what to preserve, what to change, which facts matter, and how to run the local `skills/` rewrite pipeline before saving a clean rewrite. The `rewrite-source-scaffold` skill tells the agent to preserve the source HTML/CSS structure instead of rebuilding a simpler document, and the final `rewrite-cull` skill tells it to delete debatable lines that do not add real meaning.

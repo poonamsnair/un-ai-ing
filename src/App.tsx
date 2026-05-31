@@ -64,7 +64,16 @@ import { ReferenceMark } from "./editor/ReferenceMark";
 import { ISSUE_CATEGORIES } from "./lib/issueCategories";
 import { calculateFleschKincaidGrade, formatFleschKincaidGrade } from "./lib/readability";
 import { SAMPLE_DOCUMENT_HTML, SAMPLE_TITLE } from "./lib/sampleDocument";
-import type { CommentThread, Issue, IssueCategory, IssueSeverity, SessionPayload, StyleReference } from "./types";
+import rewritePromptTemplate from "./prompts/rewrite-prompt.md?raw";
+import type {
+  CommentThread,
+  Issue,
+  IssueCategory,
+  IssueSeverity,
+  SessionPayload,
+  SourceDocumentContext,
+  StyleReference,
+} from "./types";
 
 interface TextSegment {
   start: number;
@@ -232,6 +241,10 @@ interface FolderRewritePayload {
   plainText?: string;
   html?: string;
   documentHtml?: string;
+  sourceContext?: SourceDocumentContext;
+  sourceHtml?: string;
+  sourceCss?: string;
+  sourceUrl?: string;
   issueCount?: number;
   commentCount?: number;
   rating?: RewriteRating;
@@ -336,6 +349,37 @@ const storageKey = "un-ai-ing-workspace-v1";
 const legacyStorageKey = "un-ai-ing-session-v3";
 const rewriteManifestPath = "/rewrites/manifest.json";
 const agentReviewManifestPath = "/agent-reviews/manifest.json";
+interface WorkspaceRoute {
+  docId: string;
+  versionId: string;
+}
+
+const currentVersionId = "current";
+
+const readWorkspaceRouteFromUrl = (): WorkspaceRoute => {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    docId: params.get("doc")?.trim() ?? "",
+    versionId: params.get("version")?.trim() || currentVersionId,
+  };
+};
+
+const createWorkspaceRouteUrl = (docId: string, versionId: string) => {
+  const url = new URL(window.location.href);
+  url.searchParams.set("doc", docId);
+  url.searchParams.set("version", versionId || currentVersionId);
+  return url;
+};
+
+const writeWorkspaceRouteToUrl = (docId: string, versionId: string) => {
+  if (!docId) {
+    return;
+  }
+
+  const url = createWorkspaceRouteUrl(docId, versionId);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+};
+
 const uploadAccept = [
   ".doc",
   ".docx",
@@ -353,91 +397,64 @@ const uploadAccept = [
 ].join(",");
 const supportedUploadExtensions = new Set(["doc", "docx", "pdf", "txt", "md", "html", "htm"]);
 
-const rewriteBriefingPattern = `REWRITE BRIEFING PASS
-Before rewriting, build a compact brief that defines the job for the rewrite. Treat this brief as the rewrite contract. Keep it as working notes unless the user asks to see it.
+function parseHtmlDocument(html: string) {
+  if (!html.trim() || typeof DOMParser === "undefined") {
+    return null;
+  }
 
-Use these headings:
-1. Persona: Start with "You are a..." and name the role the rewrite needs, such as an engineering editor, academic editor, policy analyst, product copywriter, technical explainer, or domain expert.
-2. Audience: Name the primary reader, what they already understand, what they need from the piece, and what level of explanation they need.
-3. Tone: Define the voice the finished draft should use. Make it appropriate for the audience, medium, and stakes.
-4. Core thesis (important): State the central claim the rewrite must preserve or sharpen. This is the anchor for the whole draft.
-5. Facts to include (important): List the non-negotiable facts, numbers, examples, terms, evidence, and reviewer instructions that must survive the rewrite. Use only facts present in the draft, comments, highlights, saved feedback, or style references.
-6. Structure (important): Outline the order the rewrite should follow and the job each section or paragraph should do.
-7. Constraints (important): List what the rewrite must avoid, including invented facts, changed legal or technical meaning, unsupported certainty, copied style-reference content, removed reviewer requirements, or tone that does not fit the audience.
+  return new DOMParser().parseFromString(html, "text/html");
+}
 
-If the draft does not provide enough evidence for one of these headings, write "not specified" for that heading and continue cautiously.`;
+function extractSourceUrlFromHtml(html: string) {
+  const sourceDocument = parseHtmlDocument(html);
+  if (!sourceDocument) {
+    return "";
+  }
 
-const stylisticRepairPattern = `STYLE-PROFILE REPAIR PASS
-Before rewriting, build a compact working style profile from the current draft, the reviewer's comments, style references, and any saved rewrite feedback. Use it to guide the rewrite. Do not include the full analysis in your final answer unless the user asks for it.
+  const canonical = sourceDocument.querySelector('link[rel~="canonical"]')?.getAttribute("href")?.trim();
+  const ogUrl = sourceDocument.querySelector('meta[property="og:url"]')?.getAttribute("content")?.trim();
+  const baseHref = sourceDocument.querySelector("base[href]")?.getAttribute("href")?.trim();
+  return canonical || ogUrl || baseHref || "";
+}
 
-1. Identify the target: name the draft's likely audience, purpose, level of formality, and the kind of authority it should project.
-2. Read through seven style layers:
-- Graphology: headings, paragraph shape, visual layout, punctuation, and how the page should scan.
-- Phonology: prose rhythm, cadence, repeated sounds, and whether sentences move too evenly or too mechanically.
-- Morphology: word forms, nominalisations, prefixes, suffixes, acronyms, and technical terms that should stay precise.
-- Lexis: vocabulary choice, register, domain language, collocations, specificity, and words that sound generic or inflated.
-- Syntax: sentence length, clause order, voice, agency, modality, transitions, where long sentences should be split, and where active verbs can replace prepositional phrases.
-- Semantics: literal meaning, implied meaning, uncertainty, technical precision, metaphors, and unsupported claims.
-- Pragmatics and discourse: audience fit, point of view, paragraph logic, cohesion, stance, and what each paragraph is trying to do.
-3. Convert observations into writing instructions:
-- Use features that make the draft clearer, more grounded, and more human.
-- Prefer the style of any reference paragraph only for rhythm, sentence shape, specificity, and formality.
-- Treat the default rewrite style below as the house style unless accuracy, legal meaning, or a reviewer comment requires a different choice.
-- Avoid features that reviewers marked as worse, generic, overconfident, over-explained, or too smooth.
-4. Rewrite with the style profile beside you:
-- Fix highlighted spans in context rather than patching them one by one.
-- Preserve accurate technical terms when they matter.
-- Change the prose enough that the whole piece reads like one intentional draft.
-5. Final pass:
-- Check that every paragraph has a job.
-- Remove filler, vague claims, and fake certainty.
-- Keep the final output clean, readable, and suitable for the intended audience.`;
+function extractOriginalCssFromHtml(html: string) {
+  if (!/<(?:style|link)\b/i.test(html)) {
+    return "";
+  }
 
-const argumentShapingPattern = `ARGUMENT-SHAPING PASS
-Before line-editing, decide whether the draft needs a local polish or a structural rewrite. If the material is an article, paper, case study, product note, or public-facing technical essay, reshape the argument before polishing sentences.
+  const sourceDocument = parseHtmlDocument(html);
+  if (!sourceDocument) {
+    return "";
+  }
 
-1. Identify the central claim the piece should prove.
-2. Build a narrative spine from the facts already in the draft:
-- Pressure: what real problem or failure makes the topic matter?
-- Proof: what numbers, examples, dataset details, workflow evidence, or measurements show that the claim is real?
-- Mechanism: how does the system, method, or benchmark work?
-- Example: which concrete case lets the reader see the mechanism in action?
-- Limits: what should the reader not overclaim?
-- Implication: what can builders, reviewers, or readers do differently after reading?
-3. Reorder sections when needed so the draft does more than explain. It should make a case.
-4. Keep every major section tied to the central claim. Cut or move details that do not support that claim, unless they are legally, technically, or practically necessary.
-5. Only after the argument works, line-edit for clarity, rhythm, and tone.`;
+  const stylesheetLinks = Array.from(sourceDocument.querySelectorAll('link[rel~="stylesheet"]'))
+    .map((link) => link.outerHTML.trim())
+    .filter(Boolean);
+  const styleBlocks = Array.from(sourceDocument.querySelectorAll("style"))
+    .map((style, index) => {
+      const css = style.textContent?.trim() ?? "";
+      return css ? `/* source style ${index + 1} */\n${css}` : "";
+    })
+    .filter(Boolean);
 
-const defaultRewriteStylePattern = `DEFAULT REWRITE STYLE
-Apply these rules across the whole rewrite, not only highlighted spans, unless accuracy, legal meaning, or a reviewer comment requires a different choice.
+  return [...stylesheetLinks, ...styleBlocks].join("\n\n");
+}
 
-- Prefer active verbs and concrete actors. Avoid unnecessary prepositional phrases, dependent clauses, and passive constructions when they weaken the sentence. Active verbs should carry the action and help hold the reader's attention.
-- Avoid overly formal transitions such as "however", "similarly", "in contrast", "nevertheless", "as a result", and "despite this". Prefer short, conversational connectors: "but", "so", "and", "or", "because", and "then". These can start sentences.
-- Prefer declarative sentences over qualifying or hedging. Keep qualifications only when they are legally, technically, or factually necessary.
-- Avoid abstract nouns and conceptual labels when a specific actor, action, object, number, or system behavior is available. Abstract writing can sound important, but it is harder to act on.
-- By default, use simple present for ongoing truths and simple past for the before state.
-- Avoid metaphors, analogies, and figurative language. Aim for literal descriptions of system behavior.
-- Whenever the draft gives an example, walk through it. Show what happens, why it matters, and what the reader should learn from it.
-- Use deliberate shifts in sentence length so the prose sounds closer to natural speech. Let some sentences land short. Let longer sentences earn their space.
-- Make each line intentional. Cut throat-clearing, filler, and sentences that repeat the same claim in softer words. Each sentence should add a new claim, detail, consequence, or turn.
-- Use high-valence, high-certainty language when the facts support it. Do not add fake certainty where the draft needs caution.
-- Give the text a clear hero and arc: who or what carries the piece, what changes, and why the reader should keep going.
-- Prefer invisible signposts. Let the order of ideas orient the reader, such as moving from what it does, to how it is measured, to early results, to what comes next.
-- Keep a single, consistent voice throughout the rewrite.
-- Treat the Flesch-Kincaid Grade Level check as a guardrail, not the main goal. If the current draft is already at or below grade 10.0, do not simplify just to lower the score. Preserve authority, precise terms, and useful technical density. If the clean rewrite is above grade 10.0, revise only the sentences that are unclear, overloaded, or needlessly abstract until the text reaches the target without losing meaning.`;
-
-const styleReferenceMatchingPattern = `STYLE-REFERENCE MATCHING PASS
-Use this pass for every item under STYLE REFERENCES. Each reference paragraph is a style sample for its paired draft span.
-
-For each style reference:
-1. Treat "Reference paragraph for style only" as the target style sample.
-2. Analyse that reference through the seven style layers: graphology, phonology, morphology, lexis, syntax, semantics, and pragmatics/discourse.
-3. Turn the analysis into a short style recipe covering page shape, sentence rhythm, word choice, sentence structure, level of detail, stance, and audience relationship.
-4. Rewrite the paired "Draft span to rewrite" so it follows that style recipe while preserving the draft's meaning, evidence, technical terms, and domain facts.
-5. Match the reference's feel, pacing, specificity, and structure. Do not copy its topic, claims, examples, facts, or distinctive phrases.
-6. Blend the rewritten span back into the full paper so the final draft still reads as one coherent piece.
-
-If multiple style references exist, each one controls only its attached draft span unless the reviewer explicitly says otherwise.`;
+function createSourceContextFromHtml(
+  kind: SourceDocumentContext["kind"],
+  name: string,
+  html: string,
+  overrides: Partial<SourceDocumentContext> = {},
+): SourceDocumentContext {
+  return {
+    kind,
+    name,
+    originalHtml: html,
+    originalCss: extractOriginalCssFromHtml(html),
+    sourceUrl: extractSourceUrlFromHtml(html) || undefined,
+    ...overrides,
+  };
+}
 
 const nowIso = () => new Date().toISOString();
 
@@ -486,12 +503,18 @@ const agentReviewBelongsToDocument = (review: AgentReviewPayload, document: Pick
 const createSavedDocument = (overrides: Partial<SavedDocument> = {}): SavedDocument => {
   const createdAt = overrides.createdAt ?? nowIso();
   const documentHtml = overrides.documentHtml ?? SAMPLE_DOCUMENT_HTML;
+  const fallbackSourceContext = createSourceContextFromHtml(
+    documentHtml === blankDocumentHtml ? "blank" : "sample",
+    overrides.title?.trim() || SAMPLE_TITLE,
+    documentHtml,
+  );
 
   return {
     id: overrides.id ?? createId("doc"),
     title: overrides.title?.trim() || SAMPLE_TITLE,
     documentHtml,
     plainText: overrides.plainText ?? htmlToText(documentHtml),
+    sourceContext: overrides.sourceContext ?? fallbackSourceContext,
     issues: overrides.issues ?? [],
     comments: overrides.comments ?? [],
     styleReferences: overrides.styleReferences ?? [],
@@ -510,6 +533,7 @@ const createBlankSavedDocument = () =>
     title: "Untitled draft",
     documentHtml: blankDocumentHtml,
     plainText: "Untitled draft",
+    sourceContext: createSourceContextFromHtml("blank", "Untitled draft", blankDocumentHtml),
   });
 
 const normalizeSelectionText = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
@@ -910,7 +934,7 @@ const normaliseFolderRewrite = (
   entry: RewriteManifestEntry,
   payload: FolderRewritePayload,
 ): RewriteVersion | null => {
-  const html = payload.html ?? payload.documentHtml ?? "";
+  const html = payload.html ?? payload.documentHtml ?? payload.sourceHtml ?? "";
   const text = payload.text ?? payload.plainText ?? (html ? htmlToText(html) : "");
 
   if (!text.trim() && !html.trim()) {
@@ -1126,12 +1150,25 @@ const cleanInlineMarkupValue = (value: string) =>
     .replace(/\]/g, ")")
     .trim();
 
-const getIssueFixTag = (issue: IssueFixMarkup) =>
-  `[FIX source="${cleanInlineMarkupValue(issue.source ?? "un-AI-ing")}" issue="${cleanInlineMarkupValue(
-    issue.label,
-  )}" why="${cleanInlineMarkupValue(issue.reason)}" suggestion="${cleanInlineMarkupValue(issue.suggestion)}"${
-    issue.replacements?.length ? ` replacements="${cleanInlineMarkupValue(issue.replacements.join(" | "))}"` : ""
+const uniqueInlineValues = (values: string[]) => Array.from(new Set(values.map(cleanInlineMarkupValue).filter(Boolean)));
+
+const getIssueFixTag = (issues: IssueFixMarkup | IssueFixMarkup[]) => {
+  const issueList = Array.isArray(issues) ? issues : [issues];
+  const source =
+    issueList.length === 1
+      ? cleanInlineMarkupValue(issueList[0].source ?? "un-AI-ing")
+      : uniqueInlineValues(issueList.map((issue) => issue.source ?? "un-AI-ing")).join(" | ");
+  const label = uniqueInlineValues(
+    issueList.map((issue) => `${issue.label}${issue.source ? ` (${issue.source})` : ""}`),
+  ).join(" | ");
+  const reason = uniqueInlineValues(issueList.map((issue) => issue.reason)).join(" | ");
+  const suggestion = uniqueInlineValues(issueList.map((issue) => issue.suggestion)).join(" | ");
+  const replacements = uniqueInlineValues(issueList.flatMap((issue) => issue.replacements ?? []));
+
+  return `[FIX source="${source}" issue="${label}" why="${reason}" suggestion="${suggestion}"${
+    replacements.length ? ` replacements="${replacements.join(" | ")}"` : ""
   }]`;
+};
 
 const stringFromMarkAttr = (value: unknown) => (typeof value === "string" ? value : "");
 
@@ -1178,13 +1215,12 @@ function getDraftWithInlineMarkup(editor: Editor, issueById: Map<string, Issue>)
     const issueMarks = node.marks.filter((mark) => mark.type.name === "issueMark" && typeof mark.attrs.issueId === "string");
     let nodeText = node.text;
 
-    for (const mark of [...issueMarks].reverse()) {
-      const issue = issueById.get(mark.attrs.issueId) ?? getIssueFixMarkupFromMarkAttrs(mark.attrs as Record<string, unknown>);
-      if (!issue) {
-        continue;
-      }
+    const issueFixes = issueMarks
+      .map((mark) => issueById.get(mark.attrs.issueId) ?? getIssueFixMarkupFromMarkAttrs(mark.attrs as Record<string, unknown>))
+      .filter((issue): issue is IssueFixMarkup => Boolean(issue));
 
-      nodeText = `${getIssueFixTag(issue)}${nodeText}[/FIX]`;
+    if (issueFixes.length) {
+      nodeText = `${getIssueFixTag(issueFixes)}${nodeText}[/FIX]`;
     }
 
     if (isScribbledDelete) {
@@ -1567,6 +1603,34 @@ function countWords(value: string) {
   return value.trim().split(/\s+/).filter(Boolean).length;
 }
 
+function truncatePromptText(value: string, maxLength = 500) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength).trimEnd()}… [truncated]`;
+}
+
+function truncatePromptBlock(value: string, maxLength = 120000) {
+  const normalized = value.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const omitted = normalized.length - maxLength;
+  return `${normalized.slice(0, maxLength).trimEnd()}\n\n[truncated: ${omitted} source characters omitted]`;
+}
+
+function fencedPromptBlock(language: string, value: string, emptyText: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return emptyText;
+  }
+
+  return `\`\`\`${language}\n${truncatePromptBlock(trimmed).replace(/```/g, "``\\`")}\n\`\`\``;
+}
+
 function getVersionLabel(version: RewriteVersion) {
   return `${version.label}${version.source === "folder" ? " · saved" : ""}`;
 }
@@ -1590,6 +1654,11 @@ function App() {
   const loadingVersion = useRef(false);
   const liveDraftHtml = useRef<string | null>(null);
   const activeVersionIdRef = useRef("current");
+  const initialRouteRef = useRef<WorkspaceRoute | null>(null);
+  const initialRouteAppliedRef = useRef(false);
+  if (!initialRouteRef.current) {
+    initialRouteRef.current = readWorkspaceRouteFromUrl();
+  }
   const initialDocumentRef = useRef<SavedDocument | null>(null);
   if (!initialDocumentRef.current) {
     initialDocumentRef.current = createSavedDocument();
@@ -2668,7 +2737,9 @@ function App() {
 
       for (const folderDocument of folderDocuments) {
         const alreadyShown = nextDocuments.some((document) =>
-          documentMatchesIdentity(document, { docId: folderDocument.id, title: folderDocument.title }),
+          folderDocument.id.startsWith("folder-doc-")
+            ? documentMatchesIdentity(document, { title: folderDocument.title })
+            : document.id === folderDocument.id,
         );
 
         if (!alreadyShown) {
@@ -2997,6 +3068,7 @@ function App() {
       title: title.trim() || "Untitled draft",
       documentHtml,
       plainText: documentText,
+      sourceContext: base.sourceContext,
       issues: activeIssues,
       comments,
       styleReferences,
@@ -3054,8 +3126,11 @@ function App() {
             )
           : [];
         const nextDocuments = savedDocuments.length ? savedDocuments : [createSavedDocument()];
+        const route = initialRouteRef.current;
         const nextActiveDocument =
-          nextDocuments.find((document) => document.id === workspace.activeDocumentId) ?? nextDocuments[0];
+          (route?.docId ? nextDocuments.find((document) => document.id === route.docId) : null) ??
+          nextDocuments.find((document) => document.id === workspace.activeDocumentId) ??
+          nextDocuments[0];
 
         setDocuments(nextDocuments);
         setActiveDocumentId(nextActiveDocument.id);
@@ -3476,6 +3551,11 @@ function App() {
       title: nextTitle,
       documentHtml,
       plainText: htmlToText(documentHtml),
+      sourceContext: createSourceContextFromHtml("upload", file.name, documentHtml, {
+        extension,
+        importedAt: nowIso(),
+        mimeType: file.type || undefined,
+      }),
     });
 
     setDocuments([...nextDocuments, nextDocument]);
@@ -3886,6 +3966,58 @@ function App() {
     }, 50);
   };
 
+  useEffect(() => {
+    if (!sessionHydrated) {
+      return;
+    }
+
+    const route = initialRouteRef.current;
+    const routeDocId = route?.docId ?? "";
+    const routeVersionId = route?.versionId || currentVersionId;
+
+    if (!initialRouteAppliedRef.current) {
+      if (routeDocId && activeDocumentId !== routeDocId) {
+        const targetDocument = documents.find((document) => document.id === routeDocId);
+        if (!targetDocument || !editor) {
+          return;
+        }
+
+        const { documents: nextDocuments } = getDocumentsWithActiveSnapshot();
+        const nextDocument = nextDocuments.find((document) => document.id === routeDocId) ?? targetDocument;
+        setDocuments(nextDocuments);
+        setActiveDocumentId(nextDocument.id);
+        loadDocumentIntoEditor(nextDocument);
+        return;
+      }
+
+      if (routeVersionId !== currentVersionId && activeVersionId !== routeVersionId) {
+        if (!editor) {
+          return;
+        }
+
+        if (rewriteVersions.some((version) => version.id === routeVersionId)) {
+          switchFileVersion(routeVersionId);
+        }
+        initialRouteAppliedRef.current = true;
+        return;
+      }
+
+      initialRouteAppliedRef.current = true;
+    }
+
+    writeWorkspaceRouteToUrl(activeDocumentId, activeVersionId);
+  }, [
+    activeDocumentId,
+    activeVersionId,
+    documents,
+    editor,
+    getDocumentsWithActiveSnapshot,
+    loadDocumentIntoEditor,
+    rewriteVersions,
+    sessionHydrated,
+    switchFileVersion,
+  ]);
+
   const buildCodexReviewPrompt = () => {
     if (!editor) {
       return "";
@@ -4162,64 +4294,33 @@ ${plainDraft}
     const issueById = new Map(activeIssues.map((issue) => [issue.id, issue]));
     const draftMarkup = getDraftWithInlineMarkup(editor, issueById);
 
-    const rewriteSaveInstructions = `SAVE THE REWRITE INTO PAPER FIXER
-Before you send your final answer, use your file-writing tool to save every rewrite you produce into this app's rewrite folder.
-
-Tool instruction:
-- If you are Codex, use apply_patch or the available file-editing tool.
-- If you are another coding agent, use the equivalent file-create/file-edit tool.
-
-Project-relative folder:
-public/rewrites/
-
-For each rewrite:
-1. Create one new JSON file in public/rewrites/. Do not overwrite an existing rewrite file.
-2. Use a filename like agent-YYYY-MM-DD-HHMMSS-short-title.json.
-3. Include the active docId shown in this report so un-AI-ing can attach the rewrite to the right document.
-4. Read public/rewrites/manifest.json, keep every existing entry, and append the new file entry. Do not replace the manifest with only the latest rewrite.
-5. If the filename or id already exists, create a new filename/id with a suffix instead of overwriting the older rewrite.
-6. If you produce multiple rewrite options, create one JSON file per option and add every file to the manifest.
-
-Rewrite JSON shape:
-{
-  "docId": "Active document id from this report",
-  "id": "agent-YYYY-MM-DD-HHMMSS-short-title",
-  "label": "Agent rewrite 1",
-  "createdAt": "YYYY-MM-DDTHH:mm:ssZ",
-  "title": "Draft title",
-  "text": "Clean rewritten draft as plain text or Markdown-style headings",
-  "html": "<h1>Draft title</h1><p>Clean rewritten draft as HTML for the editor</p>",
-  "issueCount": 0,
-  "commentCount": 0,
-  "rating": "unrated",
-  "note": "Short note on what changed"
-}
-
-Manifest shape:
-{
-  "rewrites": [
-    {
-      "id": "agent-YYYY-MM-DD-HHMMSS-short-title",
-      "label": "Agent rewrite 1",
-      "file": "agent-YYYY-MM-DD-HHMMSS-short-title.json",
-      "createdAt": "YYYY-MM-DDTHH:mm:ssZ"
-    }
-  ]
-}
-
-After saving the file or files, return the clean revised draft first, then a concise change log, then list the saved rewrite filenames.`;
-
     const issueLines = activeIssues.length
-      ? activeIssues
-          .map(
-            (issue, index) =>
-              `${index + 1}. ${issue.label}${issue.source ? ` (${issue.source})` : ""}${
-                issue.ruleId ? `\nRule: ${issue.ruleId}` : ""
-              }\nText: "${issue.text}"\nWhy: ${issue.reason}\nFix: ${issue.suggestion}${
-                issue.replacements?.length ? `\nRecommended edits: ${issue.replacements.join(", ")}` : ""
-              }`,
-          )
-          .join("\n\n")
+      ? [
+          "Every highlighted issue is embedded directly in the draft as [FIX] markup. Use this section as a summary only, not as a second set of instructions.",
+          "",
+          "Summary by type:",
+          ...categoryOrder
+            .map((category) => {
+              const count = activeIssues.filter((issue) => getIssueDisplayCategory(issue) === category).length;
+              return count ? `- ${ISSUE_CATEGORIES[category].shortLabel}: ${count}` : "";
+            })
+            .filter(Boolean),
+          ...(() => {
+            const manualHighlights = activeIssues.filter((issue) => issue.origin === "manual");
+            return manualHighlights.length
+              ? [
+                  "",
+                  "Manual reviewer highlights:",
+                  ...manualHighlights.map(
+                    (issue, index) =>
+                      `${index + 1}. ${issue.label}: "${issue.text}" — ${issue.suggestion}${
+                        issue.replacements?.length ? ` Recommended edits: ${issue.replacements.join(", ")}` : ""
+                      }`,
+                  ),
+                ]
+              : [];
+          })(),
+        ].join("\n")
       : "No open highlighted issues.";
 
     const commentLines = comments.length
@@ -4232,7 +4333,7 @@ After saving the file or files, return the clean revised draft first, then a con
       ? styleReferences
           .map(
             (reference, index) =>
-              `${index + 1}. Draft span to rewrite:\n"${reference.selectedText}"\n\nReference paragraph for style only:\n${reference.referenceText}\n\nApply the style-reference matching pass to this pair. Build a seven-layer style recipe from the reference, then rewrite the draft span to match that recipe while preserving the draft's meaning, evidence, and technical terms. Do not copy the reference's topic, claims, examples, facts, or distinctive phrases.`,
+              `${index + 1}. Draft span: "${reference.selectedText}"\nStyle sample: ${reference.referenceText}\nInstruction: Match rhythm, sentence shape, specificity, and formality only. Preserve the draft's meaning and do not copy the sample's facts or distinctive wording.`,
           )
           .join("\n\n---\n\n")
       : "No style references.";
@@ -4245,84 +4346,64 @@ After saving the file or files, return the clean revised draft first, then a con
 
     const versionLines = rewriteVersions.length
       ? rewriteVersions
+          .slice(0, 2)
           .map(
             (version, index) =>
-              `${index + 1}. ${version.label} (${new Date(version.createdAt).toLocaleString()})\nOverall judgement: ${version.rating}\nOpen issue count at capture: ${version.issueCount}\nWord count: ${countWords(version.text)}\nReviewer note: ${version.note || "No note"}\nText:\n${version.text}`,
+              `${index + 1}. ${version.label} (${new Date(version.createdAt).toLocaleString()})\nOverall judgement: ${version.rating}\nOpen issue count at capture: ${version.issueCount}\nReviewer note: ${version.note || "No note"}\nText excerpt:\n${truncatePromptText(version.text)}`,
           )
           .join("\n\n---\n\n")
       : "No rewrite versions captured yet.";
 
-    return `You are a senior rewrite agent helping un-AI-ing turn agent-written text into clear, intentional, audience-aware writing.
+    const currentDocumentHtml = editor.getHTML();
+    const sourceContext = activeDocument?.sourceContext;
+    const sourceHtml = sourceContext?.originalHtml?.trim() || currentDocumentHtml;
+    const sourceCss = sourceContext?.originalCss?.trim() || extractOriginalCssFromHtml(sourceHtml);
+    const documentUrl = createWorkspaceRouteUrl(activeDocumentId, activeVersionId).toString();
+    const sourceContextLines = [
+      `Document URL: ${documentUrl}`,
+      `Source kind: ${sourceContext?.kind ?? "unknown"}`,
+      `Source name: ${sourceContext?.name ?? title}`,
+      `Source URL: ${sourceContext?.sourceUrl ?? "not provided"}`,
+      `MIME type: ${sourceContext?.mimeType ?? "not provided"}`,
+      `Extension: ${sourceContext?.extension ?? "not provided"}`,
+      `Imported at: ${sourceContext?.importedAt ?? "not provided"}`,
+      "",
+      "Use the HTML/CSS below as the document scaffold. Preserve headings, lists, tables, code blocks, classes, inline styles, and stylesheet references unless a reviewer mark requires a structural change. Rewrite the text inside the scaffold; do not rebuild a simpler document from the plain-text draft when this scaffold is available.",
+      "",
+      "Original source CSS / stylesheet references:",
+      fencedPromptBlock("css", sourceCss, "No original CSS or stylesheet references were captured."),
+      "",
+      "Original source HTML scaffold:",
+      fencedPromptBlock("html", sourceHtml, "No original source HTML was captured."),
+      "",
+      "Current editor HTML scaffold:",
+      fencedPromptBlock("html", currentDocumentHtml, "No current editor HTML was captured."),
+    ].join("\n");
 
-Your job:
-1. Run the rewrite briefing pass first. Define the persona, audience, tone, core thesis, facts to include, structure, and constraints before touching the prose.
-2. Run the style-profile repair pass before rewriting. Keep it as working notes unless the user asks to see it.
-3. Run the argument-shaping pass before line-editing. Reshape the draft's claim, proof, order, and section jobs where the material needs more than local polish.
-4. Rewrite the current draft using the rewrite brief, highlighted issues, comments, argument shape, style profile, default rewrite style, and any feedback.
-5. Keep necessary technical terms when they carry legal or practical meaning.
-6. Explain jargon in context whenever the intended reader may not understand it. Keep the technical term when it matters, but make its meaning clear where it appears.
-7. When the draft gives guidance, make that guidance actionable and prescriptive enough for the reader to know what to do next.
-8. Give the rewrite a clear narrative arc where the material needs it. Use storytelling only when it makes the text easier to follow, more immediate, or more personable for the intended audience.
-9. Apply the default rewrite style below across the whole draft, especially for verb highlights.
-10. Remove generic AI phrasing, over-explaining, weak sentence shapes, and vague wording.
-11. Do not invent facts not present in the draft.
-12. For every style reference, apply the style-reference matching pass. Match the reference's rhythm, directness, sentence shape, specificity, and level of formality; do not copy its subject matter, facts, examples, claims, or wording.
-13. Save every rewrite into the un-AI-ing rewrite folder using the instructions below.
-14. If page versions are marked "better", preserve what improved. If marked "worse", avoid repeating that direction. Follow any supporting feedback alongside this.
-15. Treat red scribbles/crossed-out spans as delete instructions. Remove that text unless a nearby comment explicitly says to keep it.
-16. Text wrapped in [FIX ...]...[/FIX] is highlighted in the editor. Use the source, why, and suggestion attributes to fix that exact span in context.
-17. Before saving or returning the rewrite, run the Flesch-Kincaid Grade Level check on the clean rewritten text. Use it as a guardrail, not the main goal. If the current draft is already at or below grade 10.0, do not flatten the prose just to lower the score. If the rewrite is above 10.0, revise unclear or overloaded sentences before finalising. Include the final grade in the change log.
-18. Return a clean revised draft first, then a concise change log explaining what you changed.
-19. If a checker underline is still present in the draft, the reviewer left it for you to handle. Ignored checker marks have been removed and are not listed.
+    const replacements: Record<string, string> = {
+      TITLE: title,
+      DOC_ID: activeDocumentId,
+      WORD_COUNT: String(countWords(plainDraft)),
+      FK_GRADE: formatFleschKincaidGrade(fleschKincaidGrade),
+      FK_TARGET: fleschKincaidTarget,
+      ISSUE_COUNT: String(activeIssues.length),
+      COMMENT_COUNT: String(comments.length),
+      REFERENCE_COUNT: String(styleReferences.length),
+      DELETE_COUNT: String(draftMarkup.deletes.length),
+      VERSION_COUNT: String(rewriteVersions.length),
+      DRAFT_MARKUP: draftMarkup.text,
+      DELETE_LINES: deleteLines,
+      ISSUE_LINES: issueLines,
+      COMMENT_LINES: commentLines,
+      REFERENCE_LINES: referenceLines,
+      VERSION_LINES: versionLines,
+      SOURCE_CONTEXT: sourceContextLines,
+    };
 
-${rewriteBriefingPattern}
-
-${argumentShapingPattern}
-
-${stylisticRepairPattern}
-
-${defaultRewriteStylePattern}
-
-${styleReferenceMatchingPattern}
-
-${rewriteSaveInstructions}
-
-TITLE
-${title}
-
-DOCUMENT ID
-${activeDocumentId}
-
-CURRENT DRAFT STATS
-Words: ${countWords(plainDraft)}
-Flesch-Kincaid grade level: ${formatFleschKincaidGrade(fleschKincaidGrade)} (target: 10.0 or lower; ${fleschKincaidTarget})
-Open highlighted issues: ${activeIssues.length}
-Reviewer comments: ${comments.length}
-Style references: ${styleReferences.length}
-Scribbled delete marks: ${draftMarkup.deletes.length}
-Captured rewrite versions: ${rewriteVersions.length}
-
-DRAFT TEXT WITH INLINE FIX MARKUP
-Text inside [DELETE: ...] was scribbled/crossed out by the reviewer and should be removed in the rewrite.
-Text inside [FIX source="..." issue="..." why="..." suggestion="..."]...[/FIX] was highlighted by the writing tools or reviewer.
-
-${draftMarkup.text}
-
-SCRIBBLED DELETE MARKS
-${deleteLines}
-
-HIGHLIGHTED ISSUES
-${issueLines}
-
-COMMENTS
-${commentLines}
-
-STYLE REFERENCES
-${referenceLines}
-
-SAVED REWRITE FEEDBACK
-${versionLines}
-`;
+    return Object.entries(replacements).reduce(
+      (prompt, [token, value]) => prompt.split(`{{${token}}}`).join(value),
+      rewritePromptTemplate,
+    );
   };
 
   const copyAgentReport = async () => {

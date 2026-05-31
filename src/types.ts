@@ -55,10 +55,24 @@ export interface StyleReference {
   createdAt: string;
 }
 
+export type SourceDocumentKind = "sample" | "blank" | "upload" | "folder" | "unknown";
+
+export interface SourceDocumentContext {
+  kind: SourceDocumentKind;
+  name?: string;
+  mimeType?: string;
+  extension?: string;
+  sourceUrl?: string;
+  importedAt?: string;
+  originalHtml?: string;
+  originalCss?: string;
+}
+
 export interface SessionPayload {
   title: string;
   documentHtml: string;
   plainText: string;
+  sourceContext?: SourceDocumentContext;
   issues: Issue[];
   comments: CommentThread[];
   styleReferences: StyleReference[];

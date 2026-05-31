@@ -10,6 +10,7 @@ tmp/
 .agent-sync/
 .docx_extract/
 Books/
+books/
 .playwright-cli/
 .playwright-mcp/
 output/
@@ -17,5 +18,3 @@ coverage/
 *.log
 public/rewrites/
 public/agent-reviews/
-public/writing-graph/
-scripts/build-writing-knowledge.mjs

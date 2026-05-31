@@ -10,7 +10,6 @@
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "preview": "vite preview --host 127.0.0.1",
-    "build:writing-graph": "node scripts/build-writing-knowledge.mjs",
     "style:vale": "node_modules/@vvago/vale/bin/vale"
   },
   "keywords": [
